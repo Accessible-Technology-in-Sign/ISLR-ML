@@ -1,0 +1,27 @@
+services:
+  hands:
+    image: mp
+    entrypoint: ["python3", "main.py", "hands"]
+    volumes:
+      - /data/sign_language_videos/first_round_datasets/250_signs/clean/blue:/in:r
+      - ./output:/out
+  
+  hands-static:
+    image: mp-static
+    deploy:
+      mode: replicated
+      replicas: 96
+      endpoint_mode: vip
+    # entrypoint: ["python3", "main.py", "hands"]
+    volumes:
+      - /data/sign_language_videos/first_round_datasets/250_signs/clean/blue:/in:r
+      - ./output:/out
+    # ports:
+    #   - 1234:5000
+    networks:
+      - overlay_adapter
+
+
+networks:
+  overlay_adapter:
+    driver: overlay

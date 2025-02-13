@@ -1,0 +1,6 @@
+venv/
+model_temps/
+models/
+output/
+
+*.out

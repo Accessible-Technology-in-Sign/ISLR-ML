@@ -1,0 +1,8 @@
+h5py
+tensorflow
+ai-edge-torch
+torch
+torchvision
+onnxruntime
+onnxscript
+onnx-tf
