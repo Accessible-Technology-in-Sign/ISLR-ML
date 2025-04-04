@@ -3,4 +3,12 @@ model_temps/
 models/
 output/
 
+# mputils dir gitignore
+__pycache__/
+logs/
+out/
+data/
+
+gen_mp_all.sh
+
 *.out
