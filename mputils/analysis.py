@@ -13,7 +13,7 @@ METADATA = "/data/sign_language_videos/fingerspelling_videos/dmk_v1/metadata/dmk
 VIDEO_DIR = "/data/sign_language_videos/fingerspelling_videos/dmk_v1/video_clips"
 # METADATA = "/storage/home/hcoda1/5/rsridhar37/scratch/fingerspelling_videos/dmk_v1/metadata/dmk_v1-train.json"
 # VIDEO_DIR = "/storage/home/hcoda1/5/rsridhar37/scratch/fingerspelling_videos/dmk_v1/video_clips"
-
+ACTION_TYPES = ["print_signer_info", "make_parquet", "analyze_dropped_frames", "import_supplemental", "gen_h5_files"]
 ARG_NAME_REQUIREMENTS = {
     "sort_by": {"print_signer_info"},
     "h5_loc": {"make_parquet"},
@@ -70,7 +70,7 @@ def parse_args():
 
     parser.add_argument(
         "--action_type",
-        choices=["print_signer_info", "make_parquet", "analyze_dropped_frames", "import_supplemental"],
+        choices=ACTION_TYPES,
         type=str,
         required=True,
         help="action type. determines the analysis/data prep to run"
