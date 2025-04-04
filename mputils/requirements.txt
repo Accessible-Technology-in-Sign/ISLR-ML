@@ -1,4 +1,6 @@
 numpy
+pyarrow
+fastparquet
 h5py
 opencv-python
 mediapipe

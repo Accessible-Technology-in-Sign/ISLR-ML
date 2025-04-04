@@ -26,12 +26,10 @@ def main():
     writer_module = importlib.import_module(args.writer)
     write_file = getattr(writer_module, 'write_file')
 
-    results = np.zeros((file_iters(os.path.join("/in", args.input_file)), 1, 21, 3)) #TODO, make rest dynamic
-    for idx, frame in enumerate(load_file(os.path.join("/in", args.input_file))):
+    results = np.zeros((file_iters(args.input_file), 1, 21, 3)) #TODO, make rest dynamic
+    for idx, frame in enumerate(load_file(args.input_file)):
         results[idx, :, :, :] = post_process(run(frame))
-    write_file(os.path.join("/out", args.output_file), results)
-    
-
+    write_file(args.output_file, results)
 
 if __name__ == "__main__":
     import sys
