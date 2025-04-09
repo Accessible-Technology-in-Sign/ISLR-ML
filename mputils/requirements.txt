@@ -1,6 +1,7 @@
 numpy
 pyarrow
 fastparquet
+tables
 h5py
 opencv-python
 mediapipe

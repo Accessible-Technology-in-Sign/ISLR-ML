@@ -28,7 +28,7 @@ def main():
 
     results = np.zeros((file_iters(args.input_file), 1, 21, 3)) #TODO, make rest dynamic
     for idx, frame in enumerate(load_file(args.input_file)):
-        results[idx, :, :, :] = post_process(run(frame))
+        results[idx, :, :, :] = post_process(run(frame), world=False)
     write_file(args.output_file, results)
 
 if __name__ == "__main__":
