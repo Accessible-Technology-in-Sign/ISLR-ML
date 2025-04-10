@@ -12,7 +12,15 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from pathlib import Path
 
-ACTION_TYPES = ["print_signer_info", "make_parquet", "analyze_dropped_frames", "import_supplemental", "make_h5_table"]
+ACTION_TYPES = [
+    "print_signer_info",
+    "make_parquet",
+    "analyze_dropped_frames",
+    "import_supplemental",
+    "import_tfrecordio",
+    "make_h5_table"
+]
+
 ARG_NAME_REQUIREMENTS = {
     "sort_by": {"print_signer_info"},
     "h5_loc": {"make_parquet", "make_h5_table"},
@@ -297,15 +305,17 @@ def plot_hist_by_col(df):
 
     axs[0].hist(df.loc[:,["na_middle_pct"]], bins=20)
     axs[0].set_title("Dropped Middle Frames (%)")
-    axs[0].set(ylabel="Count (Avg per Participant)")
+    axs[0].set(ylabel="Count")
 
     axs[1].hist(df.loc[:,["na_top_pct"]], bins=20)
     axs[1].set_title("Dropped Top Frames (%)")
-    axs[1].set(ylabel="Count (Avg per Participant)")
+    axs[1].set(ylabel="Count")
 
     axs[2].hist(df.loc[:,["na_bottom_pct"]], bins=20)
     axs[2].set_title("Dropped Bottom Frames (%)")
-    axs[2].set(ylabel="Count (Avg per Participant)")
+    axs[2].set(ylabel="Count")
+
+    plt.tight_layout()
 
     dropped_hist_file = get_dropped_hist_path(args.dropped_csv_file)
     plt.savefig(dropped_hist_file)
@@ -364,7 +374,6 @@ def import_supplemental_data():
     df = df[["sequence_id", "frame"] + get_column_names(("right",))].set_index("sequence_id")
     df.to_parquet(args.parquet_file)
     
-
 ## TODO 
 #   See if this can work. As of now, it looks
 #   like all options involve looping over h5

@@ -27,9 +27,9 @@ def post_process(results, keypoints=mp.solutions.hands.HandLandmark, world=True,
         lm_list = results.multi_hand_world_landmarks
     if lm_list:
         return np.array([[[
-            1 - getattr(lm.landmark[keypoint], coord) 
+            1 - getattr(lm.landmark[keypoint], coord)
                 if results.multi_handedness[idx].classification[0].label.lower() == "left" and coord == "x" and not world
-            else getattr(lm.landmark[keypoint], coord) 
+            else getattr(lm.landmark[keypoint], coord)
             for coord in coords
             ] for keypoint in keypoints] for idx, lm in enumerate(lm_list)])
     else:
