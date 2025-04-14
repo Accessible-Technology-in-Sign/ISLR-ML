@@ -9,8 +9,20 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import csv
+import glob
+import hashlib
+import struct
+import typing
+
+import pyarrow
+import pyarrow.parquet
+
 from collections import defaultdict
 from pathlib import Path
+from tqdm import tqdm
+
+BINS = [x/100 for x in range(0,10,1)] + [x/100 for x in range(10,100,10)]
 
 ACTION_TYPES = [
     "print_signer_info",
@@ -21,14 +33,26 @@ ACTION_TYPES = [
     "make_h5_table"
 ]
 
+_FEATURE_SIZES = {
+    'timestamp': 1,
+    'pose': (33, 25),
+    'left_hand': 21,
+    'right_hand': 21,
+    'face': 478,
+}
+
 ARG_NAME_REQUIREMENTS = {
     "sort_by": {"print_signer_info"},
     "h5_loc": {"make_parquet", "make_h5_table"},
     "parquet_file": {"make_parquet", "analyze_dropped_frames", "import_supplemental"},
+    "parquet_loc": {"import_tfrecordio"},
     "dropped_csv_file": {"analyze_dropped_frames"},
     "metadata_loc": {"make_parquet", "make_h5_table", "print_signer_info"},
-    "data_loc": {"import_supplemental"}
+    "data_loc": {"import_supplemental"},
+    "tfrecordio_loc": {"import_tfrecordio"}
 }
+
+ANALYSIS_COLUMS = ["na_top_pct", "na_bottom_pct", "na_middle_pct", "na_top_count", "na_bottom_count", "na_middle_count", "total_count"]
 
 global args
 
@@ -83,7 +107,7 @@ def parse_args():
         "--metadata_loc",
         type=Path,
         required=required_by_analysis_type("metadata_loc"),
-        help="metadata location for h5 concatenation. pass this if using import_supplemental with metadata outside this repo."
+        help="metadata location for h5 concatenation. pass this if using metadata outside this repo. if doing seq_level analyis, no need to pass it."
     )
 
     parser.add_argument(
@@ -93,6 +117,20 @@ def parse_args():
         help="h5 files location. will convert h5 files into one parquet file"
     )
     
+    parser.add_argument(
+        "--tfrecordio_loc",
+        type=Path,
+        required=required_by_analysis_type("tfrecordio_loc"),
+        help="location for parquet. the meaning changes based on analysis_type"
+    )
+    
+    parser.add_argument(
+        "--parquet_loc",
+        type=Path,
+        required=required_by_analysis_type("parquet_loc"),
+        help="location for parquet. the meaning changes based on analysis_type"
+    )
+
     parser.add_argument(
         "--parquet_file",
         type=valid_parquet,
@@ -105,6 +143,12 @@ def parse_args():
         type=valid_csv,
         required=required_by_analysis_type("dropped_csv_file"),
         help="where to save dropped frames pct table. required from analyze_dropped_frames"
+    )
+
+    parser.add_argument(
+        "--seq_level",
+        action="store_true",
+        help="pass this to perform dropped frame analysis on seq level"
     )
 
     parser.add_argument(
@@ -151,8 +195,8 @@ def get_column_names(hands):
 def key_metadata(metadata):
     keyed_metadata = {}
     for datum in metadata:
-        key = datum.pop("clipFilename")
-        keyed_metadata[os.path.splitext(key)[0]] = datum
+        key = Path(datum.pop("clipFilename"))
+        keyed_metadata[key.stem] = datum
     return keyed_metadata
 
 def get_metadata(metadata_file):
@@ -209,7 +253,7 @@ def get_pct_of_total(counts_df, col):
 ######################## make_parquet helpers ##################################
 ################################################################################
 def get_new_metadata(seq_id, h5_file, keyed_metadata, new_metadata):
-    basename = os.path.splitext(h5_file)[0]
+    basename = h5_file.stem
 
     pt_id = keyed_metadata[basename]['signerId']
     phrase = keyed_metadata[basename]['phrase']
@@ -230,7 +274,10 @@ def write_main_df(data):
     df.iloc[:,2:] = df.iloc[:,2:].replace(0, np.nan)
     
     df = df.set_index("sequence_id")
-    df.to_parquet(args.parquet_file)
+    if args.parquet_file.exists():
+        df.to_parquet(args.parquet_file, engine="fastparquet", append=True)
+    else:
+        df.to_parquet(args.parquet_file, engine="fastparquet")
 
 def write_meta_df(metadata):
     meta_df = pd.DataFrame(metadata, columns=["sequence_id", "participant_id", "phrase"])
@@ -240,6 +287,92 @@ def write_meta_df(metadata):
     
     new_metadata_file = get_new_metadata_filename()
     meta_df.to_csv(new_metadata_file)
+
+################################################################################
+###################### import_tfrecordio helpers ###############################
+################################################################################
+def get_schema():
+    """Get a pyarrow Schema for the parquet tables of landmarks."""
+    schema = pyarrow.schema([])
+    schema = schema.append(pyarrow.field('clip_id', pyarrow.int32()))
+    schema = schema.append(pyarrow.field('frame', pyarrow.int32()))
+    for t in ['x', 'y', 'z', 'presence', 'visibility']:
+        for position in ['pose', 'left_hand', 'right_hand', 'face']:
+          size = _FEATURE_SIZES[position]
+          if isinstance(size, tuple):
+              size = size[0]
+          for i in range(size):
+              schema = schema.append(
+                pyarrow.field(f'{t}_{position}_{i}', pyarrow.float32()))
+    schema = schema.append(
+        pyarrow.field('timestamp', pyarrow.int64()))
+    return schema
+
+def sequence_example_to_table(example, schema, video_level_data):
+    """Convert a sequence_example into a pyarrow Table."""
+    output = list()
+    num_frames = example.context.feature['num_frames'].int64_list.value[0]
+    video_name = example.context.feature['video_name'].bytes_list.value[0]
+    # Create a positive int32 from the video_name as the identifier for the
+    # example.  TODO(mgeorg) we should ensure this is unique.
+    digest = hashlib.md5(video_name, usedforsecurity=False)
+    ident_bytes = digest.digest()[:4]
+    ident_bytes = ident_bytes[:3] + (
+        ident_bytes[3] & 0x7f).to_bytes(1, byteorder='little')
+    ident = struct.unpack('<i', ident_bytes)[0]
+    video_level_data[ident] = dict()
+    for k, v in example.context.feature.items():
+        if v.WhichOneof('kind') == 'int64_list':
+            video_level_data[ident][k] = v.int64_list.value[0]
+        elif v.WhichOneof('kind') == 'bytes_list':
+            video_level_data[ident][k] = v.bytes_list.value[0].decode('utf-8')
+        elif v.WhichOneof('kind') == 'float_list':
+            video_level_data[ident][k] = v.float_list.value[0]
+    for frame_number in range(num_frames):
+        output.append({'clip_id': ident, 'frame': frame_number})
+    for k, feature_list in example.feature_lists.feature_list.items():
+        assert len(feature_list.feature) == num_frames
+        for frame_number in range(num_frames):
+            feature = feature_list.feature[frame_number]
+            m = re.match(
+                r'^(x|y|z|presence|visibility)_(pose|left_hand|right_hand|face)$', k)
+            if m:
+                target_len = _FEATURE_SIZES[m.group(2)]
+            else:
+                assert k == 'timestamp'
+                target_len = 1
+            kind = feature.WhichOneof('kind')
+            if kind is None:
+                # Feature is empty.
+                continue
+            actual_len = len(getattr(feature, kind).value)
+            if isinstance(target_len, tuple):
+                assert actual_len in target_len, {
+                    'k': k, 'target_len': target_len, 'actual_len': actual_len}
+            else:
+                assert actual_len == target_len, {
+                    'k': k, 'target_len': target_len, 'actual_len': actual_len}
+            for i in range(actual_len):
+                if k == 'timestamp':
+                    assert i == 0
+                    assert kind == 'int64_list', feature
+                    output[frame_number][k] = (
+                        feature.int64_list.value[i])
+                    continue
+                assert kind == 'float_list', feature
+                output[frame_number][f'{k}_{i}'] = (
+                    feature.float_list.value[i])
+    return pyarrow.Table.from_pylist(output, schema=schema)
+
+class VideoLevelData(typing.NamedTuple):
+    """A row in the video level data csv."""
+    clip_id: int | None
+    video_name: str | None
+    prompt: str | None
+    num_frames: int | None
+    image_width: int | None
+    image_height: int | None
+    image_frame_rate: float | None
 
 ################################################################################
 ############################## main methods ####################################
@@ -266,7 +399,8 @@ def print_signer_info():
     print(signer_info)
 
 def make_parquet():
-    h5_files = os.listdir(args.h5_loc)
+    if args.parquet_file.exists():
+        args.parquet_file.unlink()
     seq_id = 0
     
     data = []
@@ -275,10 +409,9 @@ def make_parquet():
     metadata = get_metadata(args.metadata_loc)
     keyed_metadata = key_metadata(metadata)
     
-    for h5_file in h5_files:
-        out_file = os.path.join(args.h5_loc, h5_file)
-        
-        with h5.File(out_file, 'r') as h5_data:
+    h5_files = list(args.h5_loc.iterdir())
+    for h5_file in tqdm(h5_files):
+        with h5.File(h5_file, 'r') as h5_data:
             seq = np.array(h5_data["data"]).squeeze()
             seq = np.swapaxes(seq, 1, 2)
             seq = np.reshape(seq, (seq.shape[0], -1))
@@ -303,15 +436,15 @@ def make_parquet():
 def plot_hist_by_col(df):
     fig, axs = plt.subplots(3)
 
-    axs[0].hist(df.loc[:,["na_middle_pct"]], bins=20)
+    axs[0].hist(df.loc[:,["na_middle_pct"]], bins=BINS)
     axs[0].set_title("Dropped Middle Frames (%)")
     axs[0].set(ylabel="Count")
 
-    axs[1].hist(df.loc[:,["na_top_pct"]], bins=20)
+    axs[1].hist(df.loc[:,["na_top_pct"]], bins=BINS)
     axs[1].set_title("Dropped Top Frames (%)")
     axs[1].set(ylabel="Count")
 
-    axs[2].hist(df.loc[:,["na_bottom_pct"]], bins=20)
+    axs[2].hist(df.loc[:,["na_bottom_pct"]], bins=BINS)
     axs[2].set_title("Dropped Bottom Frames (%)")
     axs[2].set(ylabel="Count")
 
@@ -322,19 +455,12 @@ def plot_hist_by_col(df):
     plt.close()
 
 def analyze_dropped_frames():
-    if not os.path.exists(args.parquet_file):
+    if not args.parquet_file.exists():
         raise FileNotFoundError("Error: create parquet file first.")
         return
 
     df = pd.read_parquet(args.parquet_file)
-    if args.metadata_loc is None:
-        metadata_path = get_metadata_path(args.parquet_file)
-    else:
-        metadata_path = args.metadata_loc
-    metadata = pd.read_csv(metadata_path)
 
-    participant_df = metadata.loc[:, ["sequence_id", "participant_id", "phrase"]].drop_duplicates()
-    
     counts_df = get_counts_from_df(df)
     na_top_bottom_count = counts_df.loc[:,"na_top_count"] + counts_df.loc[:,"na_bottom_count"]
     counts_df["na_middle_count"] = counts_df.loc[:,"na_count"] - na_top_bottom_count
@@ -343,21 +469,93 @@ def analyze_dropped_frames():
     counts_df = get_pct_of_total(counts_df, "na_bottom_count")
     counts_df = get_pct_of_total(counts_df, "na_middle_count")
 
-    dropped_frames = pd.merge(counts_df, participant_df, on="sequence_id")
-    dropped_frames = dropped_frames.loc[:,["participant_id", "na_top_pct", "na_bottom_pct", "na_middle_pct", "na_top_count", "na_bottom_count", "na_middle_count", "total_count"]]
-    
-    final = dropped_frames.groupby("participant_id").mean()
-    final.to_csv(args.dropped_csv_file)
+    if args.seq_level:
+        final = counts_df.reset_index().loc[:,["sequence_id"] + ANALYSIS_COLUMS]
+        final = final.set_index("sequence_id")
+    else:
+        if args.metadata_loc is None:
+            metadata_path = get_metadata_path(args.parquet_file)
+        else:
+            metadata_path = args.metadata_loc
 
+        metadata = pd.read_csv(metadata_path)
+        participant_df = metadata.loc[:, ["sequence_id", "participant_id", "phrase"]].drop_duplicates()
+
+        dropped_frames = pd.merge(counts_df, participant_df, on="sequence_id")
+        dropped_frames = dropped_frames.loc[:,["participant_id"] + ANALYSIS_COLUMS]
+
+        final = dropped_frames.groupby("participant_id").mean()
+
+    final.to_csv(args.dropped_csv_file)
     plot_hist_by_col(final)
 
+def import_tfrecordio():
+    import tensorflow as tf
+
+    schema = get_schema()
+    filenames = sorted(glob.glob(str(args.tfrecordio_loc.joinpath("*.tfrecordio-?????-of-?????"))))
+    # filenames = sorted(glob.glob('*/landmarks/*.tfrecordio-?????-of-?????'))
+    all_video_level_data = dict()
+    args.parquet_loc.mkdir(parents=True, exist_ok=True)
+    for filename in filenames:
+        path = Path(filename)
+        m = re.match(r'^([^-]*)-([^-]*).tfrecordio(-\d{5}-of-\d{5})$', path.name)
+        if not m:
+            print(f'Unable to parse filename {filename}')
+            continue
+        study = m.group(1)
+        split = m.group(2)
+        shard_str = m.group(3)
+        all_video_level_data[f'{study}-{split}'] = all_video_level_data.get(
+            f'{study}-{split}', dict())
+        video_level_data = all_video_level_data[f'{study}-{split}']
+        parquet_path = args.parquet_loc.joinpath(f'{study}-{split}.parquet{shard_str}')
+        # parquet_path = path.parent.joinpath(f'{study}-{split}.parquet{shard_str}')
+        raw_dataset = tf.data.TFRecordDataset(filename)
+        tables = list()
+        for raw in raw_dataset:
+            example = tf.train.SequenceExample()
+            example.ParseFromString(raw.numpy())
+            video_name = example.context.feature[
+                'video_name'].bytes_list.value[0].decode('utf-8')
+            print(video_name)
+            tables.append(sequence_example_to_table(
+                example, schema, video_level_data))
+        if not tables:
+            print(f'No entries for table {parquet_path}')
+            continue
+        print(f'Writing to table {parquet_path}')
+        table = pyarrow.concat_tables(tables)
+        pyarrow.parquet.write_table(table, parquet_path)
+    # Create the supplemental csv files.
+    for study_split in all_video_level_data:
+        study, split = study_split.split('-')
+        supplemental_csv = f'{study}/landmarks/{study}-{split}_supplemental.csv'
+        print(f'Writing supplemental video level information to {supplemental_csv}')
+        with open(supplemental_csv, 'w', newline='') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(VideoLevelData._fields)
+            rows = list()
+            for clip_id, video_data in all_video_level_data[study_split].items():
+                rows.append(VideoLevelData(
+                    clip_id=clip_id,
+                    video_name=video_data.get('video_name'),
+                    prompt=video_data.get('prompt'),
+                    num_frames=video_data.get('num_frames'),
+                    image_width=video_data.get('image/width'),
+                    image_height=video_data.get('image/height'),
+                    image_frame_rate=video_data.get('image/frame_rate'),
+                ))
+            rows.sort(key=lambda x: (x.video_name or '', x.prompt or ''))
+            writer.writerows(rows)
+
 def import_supplemental_data():
-    supp_char_map = os.path.join(args.data_loc , "supplemental_character_to_prediction_index.json")
-    supp_landmarks = os.path.join(args.data_loc, "supplemental_landmarks")
-    supp_metadata = os.path.join(args.data_loc, "supplemental_metadata.csv")
+    supp_char_map = args.data_loc.joinpath("supplemental_character_to_prediction_index.json")
+    supp_landmarks = args.data_loc.joinpath("supplemental_landmarks")
+    supp_metadata = args.data_loc.joinpath("supplemental_metadata.csv")
 
     # metadata = pd.read_csv(supp_metadata)
-    landmarks_files = [os.path.join(supp_landmarks, supp_file) for supp_file in os.listdir(supp_landmarks)]
+    landmarks_files = [supp_landmarks.joinpath(supp_file) for supp_file in supp_landmarks.iterdir()]
 
     cols = ["sequence_id", "frame"] + get_column_names(("right_hand",))
     df = pd.DataFrame(columns=cols)
@@ -385,14 +583,14 @@ def make_h5_table():
     metadata = get_metadata(args.metadata_loc)
     metadata = key_metadata(metadata)
     
-    h5_files = sorted(os.listdir(args.h5_loc))
-    main_h5 = os.path.join(args.h5_loc, 'main.h5')
+    h5_files = sorted(list(args.h5_loc.iterdir()))
+    main_h5 = args.h5_loc.joinpath('main.h5')
 
     random.seed(564)
     random.shuffle(h5_files)
     
     for h5_file in h5_files:
-        f = h5.File(os.path.join('.', 'data', 'h5_data', h5_file), 'r')
+        f = h5.File(Path('.').joinpath('data', 'h5_data', h5_file), 'r')
         dset = f['intermediate']
 
         seq = dset[:].squeeze()
@@ -414,4 +612,5 @@ if __name__ == "__main__":
         analyze_dropped_frames()
     elif args.action_type == "import_supplemental":
         import_supplemental_data()
-
+    elif args.action_type == "import_tfrecordio":
+        import_tfrecordio()
