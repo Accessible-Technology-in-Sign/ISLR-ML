@@ -6,3 +6,4 @@ h5py
 opencv-python
 mediapipe
 flask
+tqdm

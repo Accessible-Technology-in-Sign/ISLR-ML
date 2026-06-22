@@ -1,0 +1,1 @@
+--NOTE: Renamed "succees" to "succeed" in word dataset. Rewatch video later for context.
