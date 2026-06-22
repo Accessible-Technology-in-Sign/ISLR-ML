@@ -8,8 +8,8 @@ import numpy as np
 __hands = mp.solutions.hands.Hands(
     static_image_mode = os.environ.get("STATIC_IMAGE_MODE", False),
     max_num_hands = os.environ.get("MAX_NUM_HANDS", 1),
-    min_detection_confidence=os.environ.get("MIN_DETECTION_CONFIDENCE", 0.5),
-    min_tracking_confidence=os.environ.get("MIN_TRACKING_CONFIDENCE", 0.5)
+    min_detection_confidence=float(os.environ.get("MIN_DETECTION_CONFIDENCE", 0.5)),
+    min_tracking_confidence=float(os.environ.get("MIN_TRACKING_CONFIDENCE", 0.5))
 )
 
 def run(frame, colorspace_convert=cv2.COLOR_BGR2RGB, **kwargs):
