@@ -22,7 +22,7 @@ WIREFRAME_SCRIPT=Path("./wireframe.py").resolve()
 OVERLAY_SCRIPT=Path("./wireframe.py").resolve()
 FRAMEVIEW_SCRIPT=Path("./frameview.py").resolve()
 
-WIREFRAME_PATH = Path("videos/wireframe").resolve()
+# WIREFRAME_PATH = Path("videos/wireframe").resolve()
 OVERLAY_PATH = Path("videos/overlay").resolve()
 
 FPS=30
@@ -75,7 +75,7 @@ def get_video_path(
     video_path = root / video_dirname / stem_dir
     video_path.mkdir(parents=True, exist_ok=True)
 
-    return Path(video_path)
+    return video_path
 
 ########## Logger set up utils
 def setup_logger(

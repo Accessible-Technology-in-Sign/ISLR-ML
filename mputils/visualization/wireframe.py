@@ -39,7 +39,6 @@ from utils import (
     setup_logger,
     get_tqdm_filter_desc,
     get_video_path,
-    WIREFRAME_PATH,
     FPS,
 )
 
@@ -49,7 +48,9 @@ from utils import (
 
 # from utils import *
 
-LOGS_PATH = Path("logs/wireframe").resolve()
+WIREFRAME_PATH = Path().resolve()
+LOGS_PATH = Path().resolve()
+# LOGS_PATH = Path("logs/wireframe").resolve()
 
 PARQUET_FEATURE_LIST = [
     'sequence_id',
@@ -63,13 +64,26 @@ PARQUET_FEATURE_LIST = [
 ]
 PARQUET_RH_FEATURES = [i for i in range(0, 42)]
 
-global args
+# global args
+def set_global_paths():
+    global WIREFRAME_PATH
+    global LOGS_PATH
+    
+    WIREFRAME_PATH = WIREFRAME_PATH / "videos"/ "wireframe"
+    LOGS_PATH = LOGS_PATH / "logs" / "wireframe"
+    
+    if args.interpolate is not None:
+        WIREFRAME_PATH /= f"interp{args.interpolate}"
+        LOGS_PATH /= f"interp{args.interpolate}"
 
 # Video Path: videos/1967755728/f418
 # /data/parquet/asl-fingerspelling/train_landmarks/1967755728.parquet
 def load_parquet(filename) -> pd.DataFrame:
     logging.info(f"Parquet file: {filename}")
     parquet_array = pq.read_table(filename, columns=PARQUET_FEATURE_LIST, memory_map=True).to_pandas()
+    if args.debug:
+        dbg_sample = parquet_array.sample(n=50, random_state=args.seed).index
+        parquet_array = parquet_array.loc[dbg_sample]
     return parquet_array
 
 # render a wireframe video file using landmark data and save it to disk
@@ -166,7 +180,7 @@ def render(data, filename, pt_id, wireframe=True):
     # ax.set_zlim(-zoom / 10, zoom)
     # ani = animation.FuncAnimation(fig, update, len(repeated), fargs=(xs, ys, zs), interval=1000 / FPS)
     ani = animation.FuncAnimation(fig, update, len(repeated), fargs=(xs, ys), interval=1000 / FPS)
-
+    
     video_path = get_video_path(
         args.parquet_file,
         WIREFRAME_PATH,
@@ -196,9 +210,61 @@ def filter_by_pt_id(metadata):
     logging.info(f"Sequences after filtering by participant: {metadata.shape[0]}")
     return metadata
 
+def interpolate_data(data):
+    def interpolate(row, interpolate_val=0):
+        X = row.x_right_0 == 0.0
+        if X.all():
+            return row
+        X = X.to_list()
+        
+        start = X.index(False)
+        end = len(X) - X[::-1].index(False)
+        if start == end:
+            return row
+        
+        row = row.reset_index(drop=True)
+        row_nan = row.iloc[start:end].replace(0.0, np.nan)
+        # row_nan = row.iloc[start:end]
+        row_nan = row_nan.interpolate()
+
+        if interpolate_val == 0:
+            return pd.concat([row.iloc[:start], row_nan, row.iloc[end:]])
+
+        fwd_row = row_nan[1:].reset_index(drop=True)
+        bck_row = row_nan[:-1].reset_index(drop=True)
+        row_sum = fwd_row + bck_row
+
+        interp_row = (row_sum / 2)
+        subset_row = row_nan.reset_index(drop=True)
+        
+        interp_row["order"] = list(range(1, interp_row.shape[0] * 2, 2))
+        subset_row["order"] = list(range(0, subset_row.shape[0] * 2, 2))
+        interp_row = interp_row.set_index("order")
+        subset_row = subset_row.set_index("order")
+        
+        new_row = pd.concat([interp_row, subset_row])
+        new_row = new_row.sort_index().reset_index().drop("order", axis=1)
+        new_row = pd.concat([row.iloc[:start], new_row, row.iloc[end:]])
+
+        return new_row
+    
+    data = data.drop(columns=["frame"]).fillna(0.0)
+    data = data.groupby("sequence_id").apply(
+        interpolate,
+        interpolate_val=args.interpolate,
+    )
+    data = data.reset_index().rename(columns={"level_1":"frame"}).set_index("sequence_id")
+    return data
+
 # generate videos from filtered sequence ids in a loop.
 def generate_videos():
     pq_data = load_parquet(args.parquet_file)
+    if args.interpolate is not None:
+        pq_data = interpolate_data(pq_data)
+    
+    logging.debug(pq_data)
+    sys.exit(1)
+
     metadata_file = (
         args.parquet_file.parents[1] /
         "metadata" /
@@ -245,7 +311,9 @@ def generate_videos():
 if __name__ == '__main__':
     args = parse_args()
     check_args(args)
+
     random.seed(args.seed)
+    set_global_paths()
 
     setup_logger(
         args.seed,
@@ -257,5 +325,6 @@ if __name__ == '__main__':
         std_out=args.std_out,
         debug=args.debug,
     )
+
     generate_videos()
 

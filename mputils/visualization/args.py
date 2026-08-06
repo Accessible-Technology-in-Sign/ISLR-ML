@@ -73,6 +73,7 @@ def parse_args():
     parser.add_argument("-pf", "--parquet_file", type=Path, required=is_required("parquet_file"), help="parquet file for processing.")
     parser.add_argument("-sd", "--seed", type=int, default=7987, help="seed for random sampling.")
     parser.add_argument("-bp", "--bar_position", type=int, default=0, help="Bar position for tqdm.")
+    parser.add_argument("-ip", "--interpolate", type=int, default=None, help="turns on interpolation. only for wireframe videos.")
     parser.add_argument("-std", "--std_out", action="store_true", help="output to standard out (tqdm will be disabled).")
     parser.add_argument("-dbg", "--debug", action="store_true", help="output to standard out (tqdm will be disabled).")
     
